@@ -458,3 +458,36 @@ void main() {
 2.  **Shape Configuration**：使用者可在 `Torus`、`Trefoil Knot`、`Sphere` 間切換。當選擇不同的形狀時，主循環中會觸發 `rebuildGeometry = true`，安全地在 GPU 閒置後（`vkDeviceWaitIdle`）調用 `generateGeometry` 與重建頂點/索引緩衝區。
 3.  **Visual Style**：藉由 Push Constants 以低開銷傳遞材質參數（如 `Shininess` 與 `Ambient`）及 `colorMode` 給著色器。
 4.  **Performance & Benchmark**：提供 `GPU Load Iterations` 拖動條（0 至 500,000 次），可動態調整 Fragment Shader 的模擬負載，以實時在系統中觀察或擷取 GPU-bound 效能指標。
+
+---
+
+## 8. macOS 與 Apple Silicon 上的效能分析與除錯
+
+由於 macOS 原生不支援 Vulkan，應用程式是透過 **MoltenVK** 將 Vulkan API 呼叫轉換為 Apple 的 Metal API 來執行。因此，在 macOS 上的除錯與分析策略與 Windows/Linux 有所不同。
+
+### 8.1 Xcode Instruments 與 Metal System Trace
+在 macOS 上，無法使用 NVIDIA Nsight Systems，我們改用 Apple 內建的 **Xcode Instruments** 進行效能剖析。
+* **編譯設定 (`RelWithDebInfo`)**：在進行 Profiling 時，請務必使用 `RelWithDebInfo` 模式編譯專案（而非純 `Release` 模式）。這不僅能保留最佳化效能（避免 Debug 模式下 Vulkan 驗證層的龐大 CPU 開銷），還能**保留除錯符號 (Debug Symbols)**。如此一來，在 Instruments 的「Time Profiler」或「CPU」軌道中，你才能看見易讀的 C++ 函式名稱（如 `VulkanApp::drawFrame`），而不會只剩下無法辨識的記憶體位址。
+* **擷取 Trace**：可透過指令 `xctrace record --template 'Metal System Trace' --launch -- ./build/vulkan_app` 直接錄製效能數據。
+
+### 8.2 MoltenVK 內建效能分析
+MoltenVK 提供了極為強大的環境變數，可用來分析 Vulkan 到 Metal 的轉換開銷與執行效能：
+```bash
+MVK_CONFIG_LOG_LEVEL=3 MVK_CONFIG_PERFORMANCE_TRACKING=1 MVK_CONFIG_PERFORMANCE_LOGGING_FRAME_COUNT=120 ./build/vulkan_app
+```
+*   **`MVK_CONFIG_LOG_LEVEL=3`**：將日誌層級提升為 Info，確保效能數據能順利印出。
+*   **MoltenVK 畫面渲染生命週期 (Frame Lifecycle)**：
+    1.  **獲取畫布 (`Retrieve a CAMetalDrawable`)**：對應 Vulkan 的 `vkAcquireNextImageKHR`，向 macOS 的視窗系統 (CoreAnimation) 要一塊可用的 Back Buffer（即 Swapchain 影像）來準備畫圖。
+    2.  **轉換指令 (`Encode VkCommandBuffer to MTLCommandBuffer`)**：MoltenVK 在 CPU 端將你錄製的 Vulkan 指令緩衝區 (Command Buffer)，逐一翻譯成 Apple 原生的 Metal 指令緩衝區 (`MTLCommandBuffer`)。
+    3.  **提交指令 (`vkQueueSubmit() encoding to MTLCommandBuffers`)**：Vulkan 呼叫提交指令到佇列時的總耗時（其開銷主要來自上述的轉換時間）。
+    4.  **GPU 執行 (`Execute a MTLCommandBuffer on GPU`)**：真正交由 Apple Silicon GPU 執行著色器 (Shader) 與光柵化繪圖的硬體執行時間。
+    5.  **呈現畫面 (`Present swapchains in on GPU`)**：對應 Vulkan 的 `vkQueuePresentKHR`，將畫好的 Swapchain 影像提交給 macOS 的 WindowServer，最後垂直同步 (VSync) 並顯示在實體螢幕上。
+
+### 8.3 核心觀念解析
+* **Swapchain (交換鏈)**：Swapchain 是連結 Vulkan 應用程式與實體螢幕的橋樑。它通常包含多個影像緩衝區（如 Front Buffer 顯示於螢幕、Back Buffer 供 GPU 繪製）。此機制的目的是為了解決**畫面撕裂 (Screen Tearing)**，確保螢幕永遠只顯示繪製完成的完整畫面。
+* **MSL (Metal Shading Language)**：Apple 專門為 Metal API 設計的著色器語言。Vulkan 使用的著色器格式為 SPIR-V，但 Apple GPU 無法直接理解它。因此，MoltenVK 會在應用程式啟動時，即時將 SPIR-V 轉換為 **MSL 原始碼**，並編譯成 Metal 函式庫 (`MTLLibrary`) 供 GPU 執行。
+
+### 8.4 安全的訊號處理 (SIGINT)
+當在終端機按下 `Ctrl+C` (SIGINT) 或透過 `xctrace` 停止錄製時，作業系統會發送中斷訊號。
+* **問題**：如果在訊號處理器 (Signal Handler) 中直接呼叫 `glfwSetWindowShouldClose()` 等視窗框架 API，這並非**異步訊號安全 (Async-Signal-Safe)**，極易導致應用程式或 Profiler (如 `xctrace`) 發生 Segmentation Fault 崩潰。
+* **解法**：在 `main.cpp` 中宣告一個 `volatile sig_atomic_t g_SignalInterrupt` 的原子標記。訊號處理器只負責改變此標記的值；而 Vulkan 的主迴圈（`mainLoop`）則在安全的時機檢查此標記並優雅地退出。這樣能確保 Vulkan 資源被正確釋放，且不會發生執行緒崩潰。
