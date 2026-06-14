@@ -36,17 +36,29 @@ The project uses the following components:
 ## 📦 Prerequisites
 
 ### 1. Install Vulkan SDK
-Ensure you have the Vulkan SDK installed on your system. For Ubuntu/Debian:
+Ensure you have the Vulkan SDK installed on your system. 
+
+**For Ubuntu/Debian:**
 ```bash
 sudo apt install vulkan-sdk
 ```
+
+**For macOS (via Homebrew):**
+```bash
+brew install cmake vulkan-loader vulkan-headers molten-vk shaderc glslang
+```
+
 Alternatively, download it from the [LunarG Vulkan SDK page](https://vulkan.lunarg.com/).
 
-### 2. Install Development Libraries (X11)
+### 2. Install Development Libraries (X11/Cocoa)
+**For Ubuntu/Debian:**
 To build GLFW and link system windowing dependencies, install X11 development headers:
 ```bash
 sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev
 ```
+
+**For macOS:**
+GLFW will automatically use the native Cocoa framework, so no additional windowing libraries are required.
 
 ---
 
@@ -54,10 +66,10 @@ sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-d
 
 1.  **Configure the build directory**:
     ```bash
-    cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+    cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
     ```
     > [!IMPORTANT]
-    > Always build in **`Release`** mode when profiling. In `Debug` mode, Vulkan Validation Layers are active, which increases CPU overhead by 5x to 10x and skews performance metrics.
+    > Always build in **`RelWithDebInfo`** (or `Release`) mode when profiling. In standard `Debug` mode, Vulkan Validation Layers are active, which increases CPU overhead by 5x to 10x and completely skews performance metrics. `RelWithDebInfo` gives you maximum performance while preserving debug symbols so you can see function names in your call stacks.
 
 2.  **Compile the project**:
     ```bash
@@ -71,11 +83,13 @@ sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-d
 
 ---
 
-## 📊 Performance Profiling with NVIDIA Nsight Systems
+## 📊 Performance Profiling
 
 This project is tailored to study the "fingerprints" of CPU-bound vs. GPU-bound states.
 
-### 1. Generate a Profiling Report
+### Profiling on Linux/Windows (NVIDIA Nsight Systems)
+
+#### 1. Generate a Profiling Report
 Run the application through the `nsys` command-line tool. Start the application, play around with the GUI parameters (like the **GPU Load Iterations** slider), and close the window to complete the profiling:
 
 ```bash
@@ -89,11 +103,25 @@ nsys profile \
 
 *Note: If you run this in Debug mode, set `export VK_LAYER_PATH=/path/to/vulkan/sdk/explicit_layer.d` first so validation layers can load successfully.*
 
-### 2. View CLI Summary Statistics
+#### 2. View CLI Summary Statistics
 To inspect the overhead of Vulkan API calls in your terminal:
 ```bash
 nsys stats --report vulkan_api_sum vulkan_perf_report.nsys-rep
 ```
+
+### Profiling on macOS (Xcode Instruments)
+
+On macOS, MoltenVK translates Vulkan calls to Metal. You can profile the underlying Metal performance using Apple's `xctrace` command-line tool, which captures a trace that can be analyzed in Xcode Instruments.
+
+#### 1. Generate a Metal System Trace
+Run the application with the "Metal System Trace" template:
+
+```bash
+xctrace record --template 'Metal System Trace' --launch -- ./build/vulkan_app
+```
+
+#### 2. Analyze the Trace
+The command will generate a `.trace` file (e.g., `Launch_vulkan_app_...trace`). Open this file in the **Instruments** GUI application to visually inspect CPU/GPU synchronization, frame times, and Metal API overhead.
 
 ### 3. Understanding Profiling Metrics
 *   **VSync-Bound / Idle State**: If GPU Load Iterations is `0`, you will notice `vkAcquireNextImageKHR` taking up **~90%** of the Vulkan API time. This indicates that the CPU/GPU is waiting on the display server's VSync limit.

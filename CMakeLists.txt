@@ -37,7 +37,12 @@ FetchContent_Declare(
     GIT_TAG 3.4
 )
 set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+if(APPLE)
+    set(GLFW_BUILD_COCOA ON CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_X11 OFF CACHE BOOL "" FORCE)
+else()
+    set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+endif()
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -129,6 +134,10 @@ target_link_libraries(vulkan_app PRIVATE
     glfw
     imgui
 )
+
+if(APPLE)
+    set_target_properties(vulkan_app PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "/opt/homebrew/lib")
+endif()
 
 # Copy shaders to build dir next to executable or define compile macros
 target_compile_definitions(vulkan_app PRIVATE

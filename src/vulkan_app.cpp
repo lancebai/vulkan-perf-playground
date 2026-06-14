@@ -21,7 +21,10 @@ const std::vector<const char*> validationLayers = {
 };
 
 const std::vector<const char*> deviceExtensions = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#ifdef __APPLE__
+    "VK_KHR_portability_subset"
+#endif
 };
 
 #ifdef NDEBUG
@@ -165,6 +168,10 @@ void VulkanApp::createInstance() {
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
 
+#ifdef __APPLE__
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
     // Get GLFW extensions
     uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -174,8 +181,18 @@ void VulkanApp::createInstance() {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+#ifdef __APPLE__
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
+
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
+
+    std::cout << "Enabled Instance Extensions:" << std::endl;
+    for (const char* ext : extensions) {
+        std::cout << "  " << ext << std::endl;
+    }
+
 
     VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
     if (enableValidationLayers) {
@@ -212,7 +229,9 @@ void VulkanApp::setupDebugMessenger() {
 }
 
 void VulkanApp::createSurface() {
-    if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+    VkResult res = glfwCreateWindowSurface(instance, window, nullptr, &surface);
+    if (res != VK_SUCCESS) {
+        std::cerr << "glfwCreateWindowSurface failed with VkResult: " << res << std::endl;
         throw std::runtime_error("failed to create window surface!");
     }
 }
@@ -1070,11 +1089,15 @@ void VulkanApp::cleanupSwapChain() {
     vkDestroySwapchainKHR(device, swapChain, nullptr);
 }
 
+#include <csignal>
+
+extern volatile sig_atomic_t g_SignalInterrupt;
+
 void VulkanApp::mainLoop() {
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frameCount = 0;
 
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(window) && !g_SignalInterrupt) {
         glfwPollEvents();
         drawFrame();
 

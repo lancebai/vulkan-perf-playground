@@ -88,6 +88,7 @@ public:
     ~VulkanApp();
 
     void run();
+    void stop() { if (window) glfwSetWindowShouldClose(window, GLFW_TRUE); }
 
 private:
     // Window dimensions
