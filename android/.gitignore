@@ -1,0 +1,11 @@
+# Gradle files
+build/
+.gradle/
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+
+# C++ Build output
+.cxx/

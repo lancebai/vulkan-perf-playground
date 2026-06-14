@@ -1,7 +1,13 @@
 #pragma once
 
+#ifndef __ANDROID__
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#else
+#define VK_USE_PLATFORM_ANDROID_KHR
+#include <vulkan/vulkan.h>
+#include <android_native_app_glue.h>
+#endif
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -84,17 +90,35 @@ struct SwapChainSupportDetails {
 
 class VulkanApp {
 public:
+#ifdef __ANDROID__
+    VulkanApp(struct android_app* state);
+    ~VulkanApp();
+    void run();
+    void stop() { if (androidApp) androidApp->destroyRequested = 1; }
+#else
     VulkanApp();
     ~VulkanApp();
-
     void run();
     void stop() { if (window) glfwSetWindowShouldClose(window, GLFW_TRUE); }
+#endif
 
 private:
     // Window dimensions
     uint32_t width = 1280;
     uint32_t height = 720;
+#ifdef __ANDROID__
+    struct android_app* androidApp = nullptr;
+    bool initialized = false;
+    bool isWindowVisible = false;
+#else
     GLFWwindow* window = nullptr;
+#endif
+
+#if defined(NDEBUG) || defined(__ANDROID__)
+    const bool enableValidationLayers = false;
+#else
+    const bool enableValidationLayers = true;
+#endif
 
     // Vulkan Core
     VkInstance instance = VK_NULL_HANDLE;
@@ -187,7 +211,11 @@ private:
     std::string apiVersion = "";
 
     // Initialization helpers
+#ifdef __ANDROID__
+    void initAndroidWindow();
+#else
     void initWindow();
+#endif
     void initVulkan();
     void initImGui();
     void mainLoop();
@@ -238,8 +266,15 @@ private:
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
 
     // Callbacks
+#ifdef __ANDROID__
+    static void onAppCmd(struct android_app* app, int32_t cmd);
+    static int32_t onAppInput(struct android_app* app, AInputEvent* event);
+    void handleAndroidCmd(int32_t cmd);
+    int32_t handleAndroidInput(AInputEvent* event);
+#else
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
     static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+#endif
 };

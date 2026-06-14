@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.vulkanapp">
+
+    <!-- Tell the system this app requires Vulkan -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@android:drawable/ic_menu_gallery"
+        android:label="VulkanApp"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:hasFragileUserData="false"
+        android:debuggable="true">
+
+        <!-- Our activity is the built-in NativeActivity framework class.
+             This will take care of integrating with our NDK code. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:exported="true"
+            android:label="VulkanApp">
+            
+            <!-- Tell NativeActivity the name of our .so -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="vulkan_app" />
+            
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

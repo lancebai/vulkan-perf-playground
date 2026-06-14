@@ -10,6 +10,14 @@
 #include <cstring>
 #include <set>
 #include <chrono>
+#include <thread>
+#ifdef __ANDROID__
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include "backends/imgui_impl_android.h"
+#include <android/input.h>
+#include <android/native_window.h>
+#endif
 
 #ifndef SHADER_DIR
 #define SHADER_DIR "./shaders/"
@@ -34,7 +42,20 @@ const bool enableValidationLayers = true;
 #endif
 
 // Helper function to read shader files
+static AAssetManager* g_AssetManager = nullptr;
+
 static std::vector<char> readFile(const std::string& filename) {
+#ifdef __ANDROID__
+    AAsset* file = AAssetManager_open(g_AssetManager, filename.c_str(), AASSET_MODE_BUFFER);
+    if (!file) {
+        throw std::runtime_error("failed to open file on Android: " + filename);
+    }
+    size_t fileLength = AAsset_getLength(file);
+    std::vector<char> buffer(fileLength);
+    AAsset_read(file, buffer.data(), fileLength);
+    AAsset_close(file);
+    return buffer;
+#else
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
     if (!file.is_open()) {
@@ -49,6 +70,7 @@ static std::vector<char> readFile(const std::string& filename) {
     file.close();
 
     return buffer;
+#endif
 }
 
 // Proxies for Debug Messenger extensions
@@ -77,21 +99,64 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE;
 }
 
+#ifdef __ANDROID__
+int32_t VulkanApp::onAppInput(struct android_app* app, AInputEvent* event) {
+    return ImGui_ImplAndroid_HandleInputEvent(event);
+}
+void VulkanApp::onAppCmd(struct android_app* app, int32_t cmd) {
+    auto* vulkanApp = reinterpret_cast<VulkanApp*>(app->userData);
+    vulkanApp->handleAndroidCmd(cmd);
+}
+VulkanApp::VulkanApp(struct android_app* state) : androidApp(state) {
+    state->userData = this;
+    state->onAppCmd = onAppCmd;
+    state->onInputEvent = onAppInput;
+    g_AssetManager = state->activity->assetManager;
+    generateGeometry();
+}
+void VulkanApp::handleAndroidCmd(int32_t cmd) {
+    switch (cmd) {
+        case APP_CMD_INIT_WINDOW:
+            if (androidApp->window != nullptr) {
+                initAndroidWindow();
+                if (!initialized) {
+                    initVulkan();
+                    initImGui();
+                    initialized = true;
+                }
+                isWindowVisible = true;
+            }
+            break;
+        case APP_CMD_TERM_WINDOW:
+            isWindowVisible = false;
+            if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+            break;
+    }
+}
+void VulkanApp::initAndroidWindow() {
+    width = ANativeWindow_getWidth(androidApp->window);
+    height = ANativeWindow_getHeight(androidApp->window);
+}
+#else
 VulkanApp::VulkanApp() {
     generateGeometry();
 }
+#endif
 
 VulkanApp::~VulkanApp() {
     cleanup();
 }
 
 void VulkanApp::run() {
+#ifndef __ANDROID__
     initWindow();
     initVulkan();
     initImGui();
+#endif
     mainLoop();
 }
 
+#ifndef __ANDROID__
 void VulkanApp::initWindow() {
     if (!glfwInit()) {
         throw std::runtime_error("failed to initialize GLFW");
@@ -111,6 +176,7 @@ void VulkanApp::initWindow() {
     glfwSetCursorPosCallback(window, cursorPosCallback);
     glfwSetScrollCallback(window, scrollCallback);
 }
+#endif
 
 void VulkanApp::initVulkan() {
     createInstance();
@@ -174,8 +240,14 @@ void VulkanApp::createInstance() {
 
     // Get GLFW extensions
     uint32_t glfwExtensionCount = 0;
+    #ifndef __ANDROID__
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
     std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+#else
+    const char* glfwExtensions[] = {"VK_KHR_surface", "VK_KHR_android_surface"};
+    glfwExtensionCount = 2;
+    std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+#endif
 
     if (enableValidationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -229,11 +301,20 @@ void VulkanApp::setupDebugMessenger() {
 }
 
 void VulkanApp::createSurface() {
+#ifdef __ANDROID__
+    VkAndroidSurfaceCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+    createInfo.window = androidApp->window;
+    if (vkCreateAndroidSurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create android surface!");
+    }
+#else
     VkResult res = glfwCreateWindowSurface(instance, window, nullptr, &surface);
     if (res != VK_SUCCESS) {
         std::cerr << "glfwCreateWindowSurface failed with VkResult: " << res << std::endl;
         throw std::runtime_error("failed to create window surface!");
     }
+#endif
 }
 
 void VulkanApp::pickPhysicalDevice() {
@@ -428,9 +509,13 @@ void VulkanApp::createSwapChain() {
     if (details.capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
         extent = details.capabilities.currentExtent;
     } else {
+#ifdef __ANDROID__
+        extent = { width, height };
+#else
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
         extent = { static_cast<uint32_t>(w), static_cast<uint32_t>(h) };
+#endif
         extent.width = std::clamp(extent.width, details.capabilities.minImageExtent.width, details.capabilities.maxImageExtent.width);
         extent.height = std::clamp(extent.height, details.capabilities.minImageExtent.height, details.capabilities.maxImageExtent.height);
     }
@@ -585,8 +670,13 @@ void VulkanApp::createDescriptorSetLayout() {
 }
 
 void VulkanApp::createGraphicsPipeline() {
+#ifdef __ANDROID__
+    std::string vertPath = "shaders/vert.spv";
+    std::string fragPath = "shaders/frag.spv";
+#else
     std::string vertPath = std::string(SHADER_DIR) + "vert.spv";
     std::string fragPath = std::string(SHADER_DIR) + "frag.spv";
+#endif
 
     auto vertShaderCode = readFile(vertPath);
     auto fragShaderCode = readFile(fragPath);
@@ -962,6 +1052,10 @@ void VulkanApp::initImGui() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+#ifdef __ANDROID__
+    ImGui::GetStyle().ScaleAllSizes(3.0f);
+    io.FontGlobalScale = 3.0f;
+#endif
 
     // Set Premium styling (Dark Theme with customized accent colors)
     ImGui::StyleColorsDark();
@@ -1005,7 +1099,11 @@ void VulkanApp::initImGui() {
         idx++;
     }
 
+    #ifdef __ANDROID__
+    ImGui_ImplAndroid_Init(androidApp->window);
+#else
     ImGui_ImplGlfw_InitForVulkan(window, true);
+#endif
     ImGui_ImplVulkan_InitInfo initInfo{};
     initInfo.Instance = instance;
     initInfo.PhysicalDevice = physicalDevice;
@@ -1056,12 +1154,14 @@ void VulkanApp::initImGui() {
 }
 
 void VulkanApp::recreateSwapChain() {
+#ifndef __ANDROID__
     int w = 0, h = 0;
     glfwGetFramebufferSize(window, &w, &h);
     while (w == 0 || h == 0) {
         glfwGetFramebufferSize(window, &w, &h);
         glfwWaitEvents();
     }
+#endif
 
     vkDeviceWaitIdle(device);
 
@@ -1074,19 +1174,21 @@ void VulkanApp::recreateSwapChain() {
 }
 
 void VulkanApp::cleanupSwapChain() {
-    vkDestroyImageView(device, depthImageView, nullptr);
-    vkDestroyImage(device, depthImage, nullptr);
-    vkFreeMemory(device, depthImageMemory, nullptr);
+    if (device != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, depthImageView, nullptr);
+        vkDestroyImage(device, depthImage, nullptr);
+        vkFreeMemory(device, depthImageMemory, nullptr);
 
-    for (auto framebuffer : swapChainFramebuffers) {
-        vkDestroyFramebuffer(device, framebuffer, nullptr);
+        for (auto framebuffer : swapChainFramebuffers) {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
+        for (auto imageView : swapChainImageViews) {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
     }
-
-    for (auto imageView : swapChainImageViews) {
-        vkDestroyImageView(device, imageView, nullptr);
-    }
-
-    vkDestroySwapchainKHR(device, swapChain, nullptr);
 }
 
 #include <csignal>
@@ -1094,6 +1196,37 @@ void VulkanApp::cleanupSwapChain() {
 extern volatile sig_atomic_t g_SignalInterrupt;
 
 void VulkanApp::mainLoop() {
+#ifdef __ANDROID__
+    int ident, events;
+    struct android_poll_source* source;
+    auto lastTime = std::chrono::high_resolution_clock::now();
+    int frameCount = 0;
+    while (true) {
+        int timeout = (initialized && isWindowVisible && device != VK_NULL_HANDLE) ? 0 : -1;
+        ident = ALooper_pollAll(timeout, nullptr, &events, (void**)&source);
+        if (ident >= 0) {
+            if (source != nullptr) {
+                source->process(androidApp, source);
+            }
+            if (androidApp->destroyRequested != 0) {
+                if (device) vkDeviceWaitIdle(device);
+                return;
+            }
+        } else {
+            if (!initialized || !isWindowVisible) continue;
+            drawFrame();
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - lastTime).count();
+            frameCount++;
+            if (time >= 1.0f) {
+                fps = frameCount / time;
+                frameTimeMs = 1000.0f / fps;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+        }
+    }
+#else
     auto lastTime = std::chrono::high_resolution_clock::now();
     int frameCount = 0;
 
@@ -1114,6 +1247,7 @@ void VulkanApp::mainLoop() {
     }
 
     vkDeviceWaitIdle(device);
+#endif
 }
 
 void VulkanApp::drawFrame() {
@@ -1302,7 +1436,11 @@ void VulkanApp::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imag
 
 void VulkanApp::renderImGui() {
     ImGui_ImplVulkan_NewFrame();
+#ifdef __ANDROID__
+    ImGui_ImplAndroid_NewFrame();
+#else
     ImGui_ImplGlfw_NewFrame();
+#endif
     ImGui::NewFrame();
 
     // 1. Sidebar control window
@@ -1703,13 +1841,29 @@ VkImageView VulkanApp::createImageView(VkImage image, VkFormat format, VkImageAs
 void VulkanApp::cleanup() {
     cleanupSwapChain();
 
+    if (device != VK_NULL_HANDLE) {
     // Cleanup ImGui
     if (imguiDescriptorPool != VK_NULL_HANDLE) {
         ImGui_ImplVulkan_Shutdown();
+#ifdef __ANDROID__
+        ImGui_ImplAndroid_Shutdown();
+#else
         ImGui_ImplGlfw_Shutdown();
+#endif
         ImGui::DestroyContext();
         vkDestroyDescriptorPool(device, imguiDescriptorPool, nullptr);
         imguiDescriptorPool = VK_NULL_HANDLE;
+    } else {
+        if (imguiDescriptorPool != VK_NULL_HANDLE) {
+            ImGui_ImplVulkan_Shutdown();
+#ifdef __ANDROID__
+            ImGui_ImplAndroid_Shutdown();
+#else
+            ImGui_ImplGlfw_Shutdown();
+#endif
+            ImGui::DestroyContext();
+            imguiDescriptorPool = VK_NULL_HANDLE;
+        }
     }
 
     // Cleanup Uniform Buffers
@@ -1771,9 +1925,8 @@ void VulkanApp::cleanup() {
         renderPass = VK_NULL_HANDLE;
     }
 
-    if (device != VK_NULL_HANDLE) {
-        vkDestroyDevice(device, nullptr);
-        device = VK_NULL_HANDLE;
+    vkDestroyDevice(device, nullptr);
+    device = VK_NULL_HANDLE;
     }
 
     if (enableValidationLayers && debugMessenger != VK_NULL_HANDLE) {
@@ -1791,15 +1944,18 @@ void VulkanApp::cleanup() {
         instance = VK_NULL_HANDLE;
     }
 
+#ifndef __ANDROID__
     if (window != nullptr) {
         glfwDestroyWindow(window);
         window = nullptr;
     }
 
     glfwTerminate();
+#endif
 }
 
 // Callbacks & Interaction
+#ifndef __ANDROID__
 void VulkanApp::framebufferResizeCallback(GLFWwindow* window, int width, int height) {
     auto app = reinterpret_cast<VulkanApp*>(glfwGetWindowUserPointer(window));
     app->framebufferResized = true;
@@ -1859,3 +2015,4 @@ void VulkanApp::scrollCallback(GLFWwindow* window, double xoffset, double yoffse
     app->cameraDistance -= yoffset * 0.25f;
     app->cameraDistance = std::clamp(app->cameraDistance, 0.5f, 15.0f);
 }
+#endif
