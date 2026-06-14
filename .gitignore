@@ -1,0 +1,26 @@
+# Build directories
+build/
+bin/
+lib/
+
+# Local Vulkan SDK
+vulkansdk/
+
+# Local third-party libraries
+third_party/
+
+# Compiled shaders
+shaders/*.spv
+
+# IDE/System files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.o
+compile_commands.json
+.cache/
+
+# Profiling reports
+*.sqlite
+*.nsys-rep
