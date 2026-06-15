@@ -594,3 +594,25 @@ Android 的預設行為是在遇到未宣告的設定改變（Configuration Chan
     *   **定義**：Intent 是一種「非同步的訊息傳遞物件」。你可以把它想像成 Android 系統內部的「郵差」或是「指令單」。
     *   **作用**：當你要啟動另一個 App、開啟相機、或是 Android 系統（包含 Launcher 桌面）要啟動你的遊戲時，都是發送一個 Intent 給目標 Activity。
     *   **在我們專案中的角色**：在 `AndroidManifest.xml` 中，我們設定了 `<intent-filter>` 包含 `<action android:name="android.intent.action.MAIN" />`。這就是告訴 Android 系統：「當使用者在桌面點擊我的 App 圖示時（這會觸發一個 MAIN Intent），請把這個 Intent 送給我的 `NativeActivity` 並啟動它。」
+
+### 9.6 效能分析實戰：ARM Streamline 與 Mali GPU 觀測
+
+在確保應用程式不會因為 Profiler 掛載而引發死結與無窮迴圈後（見 9.5 節），我們可以使用 ARM Streamline 進行深度的 CPU 與 GPU 效能剖析。以下為本專案在 Mali GPU 架構上的實戰觀測結果：
+
+#### 1. CPU 瓶頸分析 (Call Paths & 統計抽樣)
+透過 Streamline 的 `Call Paths` 分頁，我們可以觀察 CPU 執行緒的耗時分佈。Profiler 透過固定頻率的「統計抽樣 (Statistical Profiling)」，將收集到的 `Samples` 次數轉換為時間佔比：
+* **`Total Samples`**：代表該函數加上其內部呼叫的所有子函數的總耗時。
+* **`Self Samples`**：代表真正在該函數內部執行的耗時（尋找運算熱點的關鍵，在 Streamline 中點擊欄位排序即可找出真凶）。
+
+**觀測結果：ImGui 的巨大效能開銷**
+在 `VulkanApp::drawFrame()` 中，我們發現有高達 40%~45% 的 CPU 時間耗費在 `recordCommandBuffer` 內部，但仔細展開後，其中 **41% 的時間其實是花在 `renderImGui()` 上**，真正給 Vulkan 繪圖指令 (`vkCmdDrawIndexed` 等) 的耗時只佔不到 3%。
+* **原因解析**：Dear ImGui 屬於 **立即模式 (Immediate Mode GUI)**，它每一幀都在 CPU 端重新計算 UI 排版、查表字型、並動態產生數以千計的 UI 頂點 (Vertices) 寫入 Buffer。相較之下，我們的 3D 物件（如甜甜圈）的頂點只在初始化時計算一次並常駐 GPU，繪圖時 CPU 只需發出一行指令即可。這完美展示了 Vulkan 將渲染重擔從 CPU 卸載到 GPU 的強大優勢。
+* **業界實務**：為了省電與極致效能，正式版的手機遊戲通常會拔除 ImGui 面板，改用 Android 原生 UI (保留模式 Retained Mode，藉由 HWUI/RenderThread 快取) 或是專門的 UI 中介層。但對於開發與除錯階段，ImGui 的極速開發體驗與跨平台特性仍是不可取代的。
+
+#### 2. GPU 瓶頸分析 (Mali 硬體計數器)
+要在 Streamline 中觀測 GPU 負載，必須在錄製前於 `Counter Configuration` 中手動勾選 Mali GPU 的相關硬體計數器 (Hardware Counters)。
+
+我們在 App 面板中提供了 `GPU Load Iterations` 拉桿，它會直接控制 Fragment Shader 內部的虛擬 `sin/cos/sqrt` 三角函數迴圈次數，藉此我們能清楚觀察到以下指標的劇烈變化：
+* **`Mali Shader Core Cycles: Execution core active` (ALU 算術單元負載)**：隨著拉桿數值增加，此軌跡會瞬間飆升至滿載。另外可以搭配觀察 `SFU pipe instructions` (處理複雜三角函數的特殊單元) 的飆升。
+* **`Mali Job Manager: Fragment queue active`**：因為重度運算都寫在 Fragment Shader 中，Fragment 負載會極高，而 Non-fragment (Vertex) 負載則維持極低（無多邊形增長）。
+* **`Mali Load/Store Unit Cycles` 與記憶體頻寬**：因為我們的虛擬迴圈純粹依賴暫存器計算數學公式，並沒有讀寫額外的 Texture 或 Buffer，您會觀察到在 ALU 頂到滿載的同時，Load/Store 的利用率依然是一灘死水。這印證了我們成功在手機上模擬出極端的 **Compute Bound (算術瓶頸)** 場景。
