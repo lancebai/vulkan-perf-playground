@@ -110,6 +110,7 @@ private:
     struct android_app* androidApp = nullptr;
     bool initialized = false;
     bool isWindowVisible = false;
+    bool isPaused = false;
 #else
     GLFWwindow* window = nullptr;
 #endif

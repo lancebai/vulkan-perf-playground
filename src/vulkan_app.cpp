@@ -17,6 +17,7 @@
 #include "backends/imgui_impl_android.h"
 #include <android/input.h>
 #include <android/native_window.h>
+#include <android/log.h>
 #endif
 
 #ifndef SHADER_DIR
@@ -117,6 +118,7 @@ VulkanApp::VulkanApp(struct android_app* state) : androidApp(state) {
 void VulkanApp::handleAndroidCmd(int32_t cmd) {
     switch (cmd) {
         case APP_CMD_INIT_WINDOW:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_INIT_WINDOW received");
             if (androidApp->window != nullptr) {
                 initAndroidWindow();
                 if (!initialized) {
@@ -128,8 +130,23 @@ void VulkanApp::handleAndroidCmd(int32_t cmd) {
             }
             break;
         case APP_CMD_TERM_WINDOW:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_TERM_WINDOW received");
             isWindowVisible = false;
             if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+            break;
+        case APP_CMD_GAINED_FOCUS:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_GAINED_FOCUS received");
+            break;
+        case APP_CMD_LOST_FOCUS:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_LOST_FOCUS received");
+            break;
+        case APP_CMD_PAUSE:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_PAUSE received");
+            isPaused = true;
+            break;
+        case APP_CMD_RESUME:
+            __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "handleAndroidCmd: APP_CMD_RESUME received");
+            isPaused = false;
             break;
     }
 }
@@ -202,12 +219,19 @@ void VulkanApp::initVulkan() {
 }
 
 void VulkanApp::createInstance() {
-    if (enableValidationLayers) {
-        uint32_t layerCount;
-        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
-        std::vector<VkLayerProperties> availableLayers(layerCount);
-        vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+    uint32_t layerCount;
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    std::vector<VkLayerProperties> availableLayers(layerCount);
+    vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "Available Vulkan Instance Layers:");
+    for (const auto& layerProperties : availableLayers) {
+        __android_log_print(ANDROID_LOG_INFO, "VulkanApp", "  %s", layerProperties.layerName);
+    }
+#endif
+
+    if (enableValidationLayers) {
         for (const char* layerName : validationLayers) {
             bool layerFound = false;
             for (const auto& layerProperties : availableLayers) {
@@ -1214,7 +1238,16 @@ void VulkanApp::mainLoop() {
             }
         } else {
             if (!initialized || !isWindowVisible) continue;
+            
+            auto frameStart = std::chrono::high_resolution_clock::now();
             drawFrame();
+            
+            // Artificially limit to ~60 FPS when Android disconnects VSync
+            auto frameEnd = std::chrono::high_resolution_clock::now();
+            auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - frameStart);
+            if (frameDuration.count() < 16) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16 - frameDuration.count()));
+            }
             auto currentTime = std::chrono::high_resolution_clock::now();
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - lastTime).count();
             frameCount++;
@@ -1445,8 +1478,8 @@ void VulkanApp::renderImGui() {
 
     // 1. Sidebar control window
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(360, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Engine Settings", nullptr, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetNextWindowSize(ImVec2(360, 600), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Engine Settings", nullptr);
 
     // Title
     ImGui::TextColored(ImVec4(0.18f, 0.70f, 1.00f, 1.00f), "VULKAN INTERACTIVE RENDERER");
@@ -1501,7 +1534,7 @@ void VulkanApp::renderImGui() {
 
     // 5. Performance & Benchmark
     if (ImGui::CollapsingHeader("Performance & Benchmark", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("GPU Load Iterations", &pushConsts.gpuLoadIterations, 0, 500000);
+        ImGui::SliderInt("GPU Load Iterations", &pushConsts.gpuLoadIterations, 0, 50000, "%d", ImGuiSliderFlags_Logarithmic);
         if (pushConsts.gpuLoadIterations > 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Warning: Simulated GPU-bound bottleneck.");
         }

@@ -544,6 +544,9 @@ sequenceDiagram
 1. **非同步的螢幕建立**：在 `android_main` 剛執行時，`androidApp->window` 仍是空指標 (`nullptr`)。此時若強行呼叫 `vkCreateAndroidSurfaceKHR` 或查詢 GPU `vkGetPhysicalDeviceSurfaceSupportKHR`，會導致 **「failed to find a suitable GPU!」** 甚至崩潰。
 2. **延遲初始化 (Deferred Initialization)**：我們必須將 `initVulkan()` 和 `initImGui()` 推遲，直到攔截到 `APP_CMD_INIT_WINDOW` 事件才執行。
 
+
+
+
 ### 9.2 Android Shader 的封裝與讀取 (AAssetManager)
 
 在 CMake 中編譯出的 `.spv` 檔案（SPIR-V 著色器）不能直接透過絕對路徑讀取。
@@ -564,3 +567,30 @@ sequenceDiagram
 由於 Android 初始化被延遲且可能隨時中斷，`cleanup()` 函數必須具有高度的防護性：
 * 若 `initVulkan()` 因為任何原因（例如找不到 shader）拋出異常，尚未建立好的 Vulkan Handle（如 `VkSemaphore`, `VkDevice`）將為 null。
 * 清理時必須檢查 `device != VK_NULL_HANDLE`，且陣列遍歷必須以 `.size()` 為主（而非定值 `MAX_FRAMES_IN_FLIGHT`），避免空指標解引用（Null Pointer Dereference, SIGSEGV）。
+
+### 9.5 Activity 生命週期死結與 Profiler 攔截分析
+
+在進行 GPU 效能剖析（如使用 ARM Performance Studio）時，Profiler 通常會以注入 Overlay 或改變螢幕設定檔（例如修改 Density 或 UI Mode）的方式來攔截 Vulkan API。這會在 Android 系統中引發一系列連鎖反應，若未妥善處理，極易造成 **永久黑屏 (Permanent Blackout)** 或 **Mutex 死結 (Deadlock)**。
+
+#### 1. 背景強制降速渲染 (Throttled Background Rendering)
+當 Profiler 的 Overlay 蓋住 Vulkan 應用程式時，Android 系統會對我們的應用程式發出 `APP_CMD_PAUSE` 指令。
+* **問題**：如果在收到 `PAUSE` 時完全停止呼叫 `drawFrame()`，應用程式將陷入永久沉睡，不僅螢幕黑掉，Profiler 也無法錄製到任何 GPU 負載資料。但若繼續無腦繪製，由於 SurfaceFlinger 會在背景切斷 VSync 訊號，導致 `vkAcquireNextImageKHR` 與 `vkQueuePresentKHR` 瞬間回傳成功，造成 FPS 暴衝至 1000+，引發裝置過熱或崩潰。
+* **解決方案**：實作**背景強制降速渲染**。在 `isPaused` 狀態下，我們依然呼叫 `drawFrame()` 以供應工作負載給 Profiler 紀錄，但在 CPU 端手動透過 `std::this_thread::sleep_for` 測量並補足每幀 16ms 的間隔，完美模擬 60 FPS 的 VSync 節奏。
+
+#### 2. 避免 Activity 重建與 Mutex 死結
+Android 的預設行為是在遇到未宣告的設定改變（Configuration Change，例如 Profiler 注入時改變了 Screen Layout 或 Density）時，將目前的 `NativeActivity` 丟入背景，並直接產生一個**全新**的 `NativeActivity`。
+* **問題**：C++ 層的 `main.cpp` 通常會使用全域鎖（例如 `std::lock_guard<std::mutex> lock(g_AndroidMainMutex)`）來防止多個 Vulkan 實體同時存取未受保護的資源（如 ImGui Global Context）。當系統重啟 Activity 時，舊的 Activity（雖在背景但未被銷毀）永遠佔用著 Mutex；而新的 Activity 一啟動就被 Mutex 永久卡死。新 Activity 無法繪圖，舊 Activity 被系統隱藏，結果就是使用者看到永久的黑畫面。
+* **解決方案**：在 `AndroidManifest.xml` 中，必須明確宣告 `<activity android:configChanges="orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|density|uiMode|colorMode" android:launchMode="singleTask">`。這樣做能告訴 Android 系統：「無論 Profiler 如何改變系統設定，都絕對不允許重建我的 Activity」，強制確保應用程式的單一實體能平穩且無中斷地在相同的 Thread 上運行。
+
+#### 3. 補充說明：AOSP 中的 Activity 與 Intent 基礎概念
+
+在探討上述的 Android 生命週期時，有兩個 AOSP (Android Open Source Project) 最核心的概念必須了解：
+
+*   **Activity (活動)**：
+    *   **定義**：Activity 是 Android 應用程式的「單一螢幕/畫面」。在桌面作業系統中，我們習慣說「開一個視窗 (Window)」；但在 Android 中，我們說「啟動一個 Activity」。
+    *   **生命週期**：它是由 Android 系統全權管理的，具有嚴格的狀態機（`onCreate` -> `onStart` -> `onResume` -> `onPause` -> `onStop` -> `onDestroy`）。當別的 App（或 Profiler Overlay）蓋住你的 App 時，你的 Activity 就會進入 `PAUSE` 或 `STOP` 狀態。
+    *   **NativeActivity**：C++ 遊戲引擎通常不需要寫 Java 程式碼，Android 提供了一個預先寫好的 Java 類別叫做 `NativeActivity`。它會在背景幫你把 Java 層的生命週期事件（例如螢幕旋轉、失去焦點）打包成 C 語言的 `APP_CMD_*` 事件，透過 JNI (Java Native Interface) 丟進你的 `android_main` 執行緒中。
+*   **Intent (意圖)**：
+    *   **定義**：Intent 是一種「非同步的訊息傳遞物件」。你可以把它想像成 Android 系統內部的「郵差」或是「指令單」。
+    *   **作用**：當你要啟動另一個 App、開啟相機、或是 Android 系統（包含 Launcher 桌面）要啟動你的遊戲時，都是發送一個 Intent 給目標 Activity。
+    *   **在我們專案中的角色**：在 `AndroidManifest.xml` 中，我們設定了 `<intent-filter>` 包含 `<action android:name="android.intent.action.MAIN" />`。這就是告訴 Android 系統：「當使用者在桌面點擊我的 App 圖示時（這會觸發一個 MAIN Intent），請把這個 Intent 送給我的 `NativeActivity` 並啟動它。」
